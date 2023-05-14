@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path$1 from 'path';
 import { fileURLToPath, pathToFileURL, URL as URL$1 } from 'url';
-import require$$5 from 'util';
 import proc from 'process';
 import process$1 from 'node:process';
 import os from 'node:os';
@@ -10179,444 +10178,516 @@ function gfmStrikethrough(options) {
   }
 }
 
+class EditMap {
+  constructor() {
+    this.map = [];
+  }
+  add(index, remove, add) {
+    addImpl(this, index, remove, add);
+  }
+  consume(events) {
+    this.map.sort((a, b) => a[0] - b[0]);
+    if (this.map.length === 0) {
+      return
+    }
+    let index = this.map.length;
+    const vecs = [];
+    while (index > 0) {
+      index -= 1;
+      vecs.push(events.slice(this.map[index][0] + this.map[index][1]));
+      vecs.push(this.map[index][2]);
+      events.length = this.map[index][0];
+    }
+    vecs.push([...events]);
+    events.length = 0;
+    let slice = vecs.pop();
+    while (slice) {
+      events.push(...slice);
+      slice = vecs.pop();
+    }
+    this.map.length = 0;
+  }
+}
+function addImpl(editMap, at, remove, add) {
+  let index = 0;
+  if (remove === 0 && add.length === 0) {
+    return
+  }
+  while (index < editMap.map.length) {
+    if (editMap.map[index][0] === at) {
+      editMap.map[index][1] += remove;
+      editMap.map[index][2].push(...add);
+      return
+    }
+    index += 1;
+  }
+  editMap.map.push([at, remove, add]);
+}
+
+function gfmTableAlign(events, index) {
+  let inDelimiterRow = false;
+  const align = [];
+  while (index < events.length) {
+    const event = events[index];
+    if (inDelimiterRow) {
+      if (event[0] === 'enter') {
+        if (event[1].type === 'tableContent') {
+          align.push(
+            events[index + 1][1].type === 'tableDelimiterMarker'
+              ? 'left'
+              : 'none'
+          );
+        }
+      }
+      else if (event[1].type === 'tableContent') {
+        if (events[index - 1][1].type === 'tableDelimiterMarker') {
+          const alignIndex = align.length - 1;
+          align[alignIndex] = align[alignIndex] === 'left' ? 'center' : 'right';
+        }
+      }
+      else if (event[1].type === 'tableDelimiterRow') {
+        break
+      }
+    } else if (event[0] === 'enter' && event[1].type === 'tableDelimiterRow') {
+      inDelimiterRow = true;
+    }
+    index += 1;
+  }
+  return align
+}
+
 const gfmTable = {
   flow: {
     null: {
       tokenize: tokenizeTable,
-      resolve: resolveTable
+      resolveAll: resolveTable
     }
   }
 };
-const nextPrefixedOrBlank = {
-  tokenize: tokenizeNextPrefixedOrBlank,
-  partial: true
-};
+function tokenizeTable(effects, ok, nok) {
+  const self = this;
+  let size = 0;
+  let sizeB = 0;
+  let seen;
+  return start
+  function start(code) {
+    let index = self.events.length - 1;
+    while (index > -1) {
+      const type = self.events[index][1].type;
+      if (
+        type === 'lineEnding' ||
+        type === 'linePrefix'
+      )
+        index--;
+      else break
+    }
+    const tail = index > -1 ? self.events[index][1].type : null;
+    const next =
+      tail === 'tableHead' || tail === 'tableRow' ? bodyRowStart : headRowBefore;
+    if (next === bodyRowStart && self.parser.lazy[self.now().line]) {
+      return nok(code)
+    }
+    return next(code)
+  }
+  function headRowBefore(code) {
+    effects.enter('tableHead');
+    effects.enter('tableRow');
+    return headRowStart(code)
+  }
+  function headRowStart(code) {
+    if (code === 124) {
+      return headRowBreak(code)
+    }
+    seen = true;
+    sizeB += 1;
+    return headRowBreak(code)
+  }
+  function headRowBreak(code) {
+    if (code === null) {
+      return nok(code)
+    }
+    if (markdownLineEnding(code)) {
+      if (sizeB > 1) {
+        sizeB = 0;
+        self.interrupt = true;
+        effects.exit('tableRow');
+        effects.enter('lineEnding');
+        effects.consume(code);
+        effects.exit('lineEnding');
+        return headDelimiterStart
+      }
+      return nok(code)
+    }
+    if (markdownSpace(code)) {
+      return factorySpace(effects, headRowBreak, 'whitespace')(code)
+    }
+    sizeB += 1;
+    if (seen) {
+      seen = false;
+      size += 1;
+    }
+    if (code === 124) {
+      effects.enter('tableCellDivider');
+      effects.consume(code);
+      effects.exit('tableCellDivider');
+      seen = true;
+      return headRowBreak
+    }
+    effects.enter('data');
+    return headRowData(code)
+  }
+  function headRowData(code) {
+    if (code === null || code === 124 || markdownLineEndingOrSpace(code)) {
+      effects.exit('data');
+      return headRowBreak(code)
+    }
+    effects.consume(code);
+    return code === 92 ? headRowEscape : headRowData
+  }
+  function headRowEscape(code) {
+    if (code === 92 || code === 124) {
+      effects.consume(code);
+      return headRowData
+    }
+    return headRowData(code)
+  }
+  function headDelimiterStart(code) {
+    self.interrupt = false;
+    if (self.parser.lazy[self.now().line]) {
+      return nok(code)
+    }
+    effects.enter('tableDelimiterRow');
+    seen = false;
+    if (markdownSpace(code)) {
+      return factorySpace(
+        effects,
+        headDelimiterBefore,
+        'linePrefix',
+        self.parser.constructs.disable.null.includes('codeIndented')
+          ? undefined
+          : 4
+      )(code)
+    }
+    return headDelimiterBefore(code)
+  }
+  function headDelimiterBefore(code) {
+    if (code === 45 || code === 58) {
+      return headDelimiterValueBefore(code)
+    }
+    if (code === 124) {
+      seen = true;
+      effects.enter('tableCellDivider');
+      effects.consume(code);
+      effects.exit('tableCellDivider');
+      return headDelimiterCellBefore
+    }
+    return headDelimiterNok(code)
+  }
+  function headDelimiterCellBefore(code) {
+    if (markdownSpace(code)) {
+      return factorySpace(effects, headDelimiterValueBefore, 'whitespace')(code)
+    }
+    return headDelimiterValueBefore(code)
+  }
+  function headDelimiterValueBefore(code) {
+    if (code === 58) {
+      sizeB += 1;
+      seen = true;
+      effects.enter('tableDelimiterMarker');
+      effects.consume(code);
+      effects.exit('tableDelimiterMarker');
+      return headDelimiterLeftAlignmentAfter
+    }
+    if (code === 45) {
+      sizeB += 1;
+      return headDelimiterLeftAlignmentAfter(code)
+    }
+    if (code === null || markdownLineEnding(code)) {
+      return headDelimiterCellAfter(code)
+    }
+    return headDelimiterNok(code)
+  }
+  function headDelimiterLeftAlignmentAfter(code) {
+    if (code === 45) {
+      effects.enter('tableDelimiterFiller');
+      return headDelimiterFiller(code)
+    }
+    return headDelimiterNok(code)
+  }
+  function headDelimiterFiller(code) {
+    if (code === 45) {
+      effects.consume(code);
+      return headDelimiterFiller
+    }
+    if (code === 58) {
+      seen = true;
+      effects.exit('tableDelimiterFiller');
+      effects.enter('tableDelimiterMarker');
+      effects.consume(code);
+      effects.exit('tableDelimiterMarker');
+      return headDelimiterRightAlignmentAfter
+    }
+    effects.exit('tableDelimiterFiller');
+    return headDelimiterRightAlignmentAfter(code)
+  }
+  function headDelimiterRightAlignmentAfter(code) {
+    if (markdownSpace(code)) {
+      return factorySpace(effects, headDelimiterCellAfter, 'whitespace')(code)
+    }
+    return headDelimiterCellAfter(code)
+  }
+  function headDelimiterCellAfter(code) {
+    if (code === 124) {
+      return headDelimiterBefore(code)
+    }
+    if (code === null || markdownLineEnding(code)) {
+      if (!seen || size !== sizeB) {
+        return headDelimiterNok(code)
+      }
+      effects.exit('tableDelimiterRow');
+      effects.exit('tableHead');
+      return ok(code)
+    }
+    return headDelimiterNok(code)
+  }
+  function headDelimiterNok(code) {
+    return nok(code)
+  }
+  function bodyRowStart(code) {
+    effects.enter('tableRow');
+    return bodyRowBreak(code)
+  }
+  function bodyRowBreak(code) {
+    if (code === 124) {
+      effects.enter('tableCellDivider');
+      effects.consume(code);
+      effects.exit('tableCellDivider');
+      return bodyRowBreak
+    }
+    if (code === null || markdownLineEnding(code)) {
+      effects.exit('tableRow');
+      return ok(code)
+    }
+    if (markdownSpace(code)) {
+      return factorySpace(effects, bodyRowBreak, 'whitespace')(code)
+    }
+    effects.enter('data');
+    return bodyRowData(code)
+  }
+  function bodyRowData(code) {
+    if (code === null || code === 124 || markdownLineEndingOrSpace(code)) {
+      effects.exit('data');
+      return bodyRowBreak(code)
+    }
+    effects.consume(code);
+    return code === 92 ? bodyRowEscape : bodyRowData
+  }
+  function bodyRowEscape(code) {
+    if (code === 92 || code === 124) {
+      effects.consume(code);
+      return bodyRowData
+    }
+    return bodyRowData(code)
+  }
+}
 function resolveTable(events, context) {
   let index = -1;
-  let inHead;
-  let inDelimiterRow;
-  let inRow;
-  let contentStart;
-  let contentEnd;
-  let cellStart;
-  let seenCellInRow;
+  let inFirstCellAwaitingPipe = true;
+  let rowKind = 0;
+  let lastCell = [0, 0, 0, 0];
+  let cell = [0, 0, 0, 0];
+  let afterHeadAwaitingFirstBodyRow = false;
+  let lastTableEnd = 0;
+  let currentTable;
+  let currentBody;
+  let currentCell;
+  const map = new EditMap();
   while (++index < events.length) {
-    const token = events[index][1];
-    if (inRow) {
-      if (token.type === 'temporaryTableCellContent') {
-        contentStart = contentStart || index;
-        contentEnd = index;
-      }
-      if (
-        (token.type === 'tableCellDivider' || token.type === 'tableRow') &&
-        contentEnd
+    const event = events[index];
+    const token = event[1];
+    if (event[0] === 'enter') {
+      if (token.type === 'tableHead') {
+        afterHeadAwaitingFirstBodyRow = false;
+        if (lastTableEnd !== 0) {
+          flushTableEnd(map, context, lastTableEnd, currentTable, currentBody);
+          currentBody = undefined;
+          lastTableEnd = 0;
+        }
+        currentTable = {
+          type: 'table',
+          start: Object.assign({}, token.start),
+          end: Object.assign({}, token.end)
+        };
+        map.add(index, 0, [['enter', currentTable, context]]);
+      } else if (
+        token.type === 'tableRow' ||
+        token.type === 'tableDelimiterRow'
       ) {
-        const content = {
-          type: 'tableContent',
-          start: events[contentStart][1].start,
-          end: events[contentEnd][1].end
-        };
-        const text = {
-          type: 'chunkText',
-          start: content.start,
-          end: content.end,
-          contentType: 'text'
-        };
-        events.splice(
-          contentStart,
-          contentEnd - contentStart + 1,
-          ['enter', content, context],
-          ['enter', text, context],
-          ['exit', text, context],
-          ['exit', content, context]
-        );
-        index -= contentEnd - contentStart - 3;
-        contentStart = undefined;
-        contentEnd = undefined;
+        inFirstCellAwaitingPipe = true;
+        currentCell = undefined;
+        lastCell = [0, 0, 0, 0];
+        cell = [0, index + 1, 0, 0];
+        if (afterHeadAwaitingFirstBodyRow) {
+          afterHeadAwaitingFirstBodyRow = false;
+          currentBody = {
+            type: 'tableBody',
+            start: Object.assign({}, token.start),
+            end: Object.assign({}, token.end)
+          };
+          map.add(index, 0, [['enter', currentBody, context]]);
+        }
+        rowKind = token.type === 'tableDelimiterRow' ? 2 : currentBody ? 3 : 1;
+      }
+      else if (
+        rowKind &&
+        (token.type === 'data' ||
+          token.type === 'tableDelimiterMarker' ||
+          token.type === 'tableDelimiterFiller')
+      ) {
+        inFirstCellAwaitingPipe = false;
+        if (cell[2] === 0) {
+          if (lastCell[1] !== 0) {
+            cell[0] = cell[1];
+            currentCell = flushCell(
+              map,
+              context,
+              lastCell,
+              rowKind,
+              undefined,
+              currentCell
+            );
+            lastCell = [0, 0, 0, 0];
+          }
+          cell[2] = index;
+        }
+      } else if (token.type === 'tableCellDivider') {
+        if (inFirstCellAwaitingPipe) {
+          inFirstCellAwaitingPipe = false;
+        } else {
+          if (lastCell[1] !== 0) {
+            cell[0] = cell[1];
+            currentCell = flushCell(
+              map,
+              context,
+              lastCell,
+              rowKind,
+              undefined,
+              currentCell
+            );
+          }
+          lastCell = cell;
+          cell = [lastCell[1], index, 0, 0];
+        }
       }
     }
-    if (
-      events[index][0] === 'exit' &&
-      cellStart !== undefined &&
-      cellStart + (seenCellInRow ? 0 : 1) < index &&
-      (token.type === 'tableCellDivider' ||
-        (token.type === 'tableRow' &&
-          (cellStart + 3 < index ||
-            events[cellStart][1].type !== 'whitespace')))
+    else if (token.type === 'tableHead') {
+      afterHeadAwaitingFirstBodyRow = true;
+      lastTableEnd = index;
+    } else if (
+      token.type === 'tableRow' ||
+      token.type === 'tableDelimiterRow'
     ) {
-      const cell = {
-        type: inDelimiterRow
-          ? 'tableDelimiter'
-          : inHead
-          ? 'tableHeader'
-          : 'tableData',
-        start: events[cellStart][1].start,
-        end: events[index][1].end
-      };
-      events.splice(index + (token.type === 'tableCellDivider' ? 1 : 0), 0, [
-        'exit',
-        cell,
-        context
-      ]);
-      events.splice(cellStart, 0, ['enter', cell, context]);
-      index += 2;
-      cellStart = index + 1;
-      seenCellInRow = true;
-    }
-    if (token.type === 'tableRow') {
-      inRow = events[index][0] === 'enter';
-      if (inRow) {
-        cellStart = index + 1;
-        seenCellInRow = false;
+      lastTableEnd = index;
+      if (lastCell[1] !== 0) {
+        cell[0] = cell[1];
+        currentCell = flushCell(
+          map,
+          context,
+          lastCell,
+          rowKind,
+          index,
+          currentCell
+        );
+      } else if (cell[1] !== 0) {
+        currentCell = flushCell(map, context, cell, rowKind, index, currentCell);
       }
+      rowKind = 0;
+    } else if (
+      rowKind &&
+      (token.type === 'data' ||
+        token.type === 'tableDelimiterMarker' ||
+        token.type === 'tableDelimiterFiller')
+    ) {
+      cell[3] = index;
     }
-    if (token.type === 'tableDelimiterRow') {
-      inDelimiterRow = events[index][0] === 'enter';
-      if (inDelimiterRow) {
-        cellStart = index + 1;
-        seenCellInRow = false;
-      }
-    }
-    if (token.type === 'tableHead') {
-      inHead = events[index][0] === 'enter';
+  }
+  if (lastTableEnd !== 0) {
+    flushTableEnd(map, context, lastTableEnd, currentTable, currentBody);
+  }
+  map.consume(context.events);
+  index = -1;
+  while (++index < context.events.length) {
+    const event = context.events[index];
+    if (event[0] === 'enter' && event[1].type === 'table') {
+      event[1]._align = gfmTableAlign(context.events, index);
     }
   }
   return events
 }
-function tokenizeTable(effects, ok, nok) {
-  const self = this;
-  const align = [];
-  let tableHeaderCount = 0;
-  let seenDelimiter;
-  let hasDash;
-  return start
-  function start(code) {
-    effects.enter('table')._align = align;
-    effects.enter('tableHead');
-    effects.enter('tableRow');
-    if (code === 124) {
-      return cellDividerHead(code)
-    }
-    tableHeaderCount++;
-    effects.enter('temporaryTableCellContent');
-    return inCellContentHead(code)
+function flushCell(map, context, range, rowKind, rowEnd, previousCell) {
+  const groupName =
+    rowKind === 1
+      ? 'tableHeader'
+      : rowKind === 2
+      ? 'tableDelimiter'
+      : 'tableData';
+  const valueName = 'tableContent';
+  if (range[0] !== 0) {
+    previousCell.end = Object.assign({}, getPoint(context.events, range[0]));
+    map.add(range[0], 0, [['exit', previousCell, context]]);
   }
-  function cellDividerHead(code) {
-    effects.enter('tableCellDivider');
-    effects.consume(code);
-    effects.exit('tableCellDivider');
-    seenDelimiter = true;
-    return cellBreakHead
-  }
-  function cellBreakHead(code) {
-    if (code === null || markdownLineEnding(code)) {
-      return atRowEndHead(code)
-    }
-    if (markdownSpace(code)) {
-      effects.enter('whitespace');
-      effects.consume(code);
-      return inWhitespaceHead
-    }
-    if (seenDelimiter) {
-      seenDelimiter = undefined;
-      tableHeaderCount++;
-    }
-    if (code === 124) {
-      return cellDividerHead(code)
-    }
-    effects.enter('temporaryTableCellContent');
-    return inCellContentHead(code)
-  }
-  function inWhitespaceHead(code) {
-    if (markdownSpace(code)) {
-      effects.consume(code);
-      return inWhitespaceHead
-    }
-    effects.exit('whitespace');
-    return cellBreakHead(code)
-  }
-  function inCellContentHead(code) {
-    if (code === null || code === 124 || markdownLineEndingOrSpace(code)) {
-      effects.exit('temporaryTableCellContent');
-      return cellBreakHead(code)
-    }
-    effects.consume(code);
-    return code === 92 ? inCellContentEscapeHead : inCellContentHead
-  }
-  function inCellContentEscapeHead(code) {
-    if (code === 92 || code === 124) {
-      effects.consume(code);
-      return inCellContentHead
-    }
-    return inCellContentHead(code)
-  }
-  function atRowEndHead(code) {
-    if (code === null) {
-      return nok(code)
-    }
-    effects.exit('tableRow');
-    effects.exit('tableHead');
-    const originalInterrupt = self.interrupt;
-    self.interrupt = true;
-    return effects.attempt(
-      {
-        tokenize: tokenizeRowEnd,
-        partial: true
-      },
-      function (code) {
-        self.interrupt = originalInterrupt;
-        effects.enter('tableDelimiterRow');
-        return atDelimiterRowBreak(code)
-      },
-      function (code) {
-        self.interrupt = originalInterrupt;
-        return nok(code)
+  const now = getPoint(context.events, range[1]);
+  previousCell = {
+    type: groupName,
+    start: Object.assign({}, now),
+    end: Object.assign({}, now)
+  };
+  map.add(range[1], 0, [['enter', previousCell, context]]);
+  if (range[2] !== 0) {
+    const relatedStart = getPoint(context.events, range[2]);
+    const relatedEnd = getPoint(context.events, range[3]);
+    const valueToken = {
+      type: valueName,
+      start: Object.assign({}, relatedStart),
+      end: Object.assign({}, relatedEnd)
+    };
+    map.add(range[2], 0, [['enter', valueToken, context]]);
+    if (rowKind !== 2) {
+      const start = context.events[range[2]];
+      const end = context.events[range[3]];
+      start[1].end = Object.assign({}, end[1].end);
+      start[1].type = 'chunkText';
+      start[1].contentType = 'text';
+      if (range[3] > range[2] + 1) {
+        const a = range[2] + 1;
+        const b = range[3] - range[2] - 1;
+        map.add(a, b, []);
       }
-    )(code)
+    }
+    map.add(range[3] + 1, 0, [['exit', valueToken, context]]);
   }
-  function atDelimiterRowBreak(code) {
-    if (code === null || markdownLineEnding(code)) {
-      return rowEndDelimiter(code)
-    }
-    if (markdownSpace(code)) {
-      effects.enter('whitespace');
-      effects.consume(code);
-      return inWhitespaceDelimiter
-    }
-    if (code === 45) {
-      effects.enter('tableDelimiterFiller');
-      effects.consume(code);
-      hasDash = true;
-      align.push('none');
-      return inFillerDelimiter
-    }
-    if (code === 58) {
-      effects.enter('tableDelimiterAlignment');
-      effects.consume(code);
-      effects.exit('tableDelimiterAlignment');
-      align.push('left');
-      return afterLeftAlignment
-    }
-    if (code === 124) {
-      effects.enter('tableCellDivider');
-      effects.consume(code);
-      effects.exit('tableCellDivider');
-      return atDelimiterRowBreak
-    }
-    return nok(code)
+  if (rowEnd !== undefined) {
+    previousCell.end = Object.assign({}, getPoint(context.events, rowEnd));
+    map.add(rowEnd, 0, [['exit', previousCell, context]]);
+    previousCell = undefined;
   }
-  function inWhitespaceDelimiter(code) {
-    if (markdownSpace(code)) {
-      effects.consume(code);
-      return inWhitespaceDelimiter
-    }
-    effects.exit('whitespace');
-    return atDelimiterRowBreak(code)
-  }
-  function inFillerDelimiter(code) {
-    if (code === 45) {
-      effects.consume(code);
-      return inFillerDelimiter
-    }
-    effects.exit('tableDelimiterFiller');
-    if (code === 58) {
-      effects.enter('tableDelimiterAlignment');
-      effects.consume(code);
-      effects.exit('tableDelimiterAlignment');
-      align[align.length - 1] =
-        align[align.length - 1] === 'left' ? 'center' : 'right';
-      return afterRightAlignment
-    }
-    return atDelimiterRowBreak(code)
-  }
-  function afterLeftAlignment(code) {
-    if (code === 45) {
-      effects.enter('tableDelimiterFiller');
-      effects.consume(code);
-      hasDash = true;
-      return inFillerDelimiter
-    }
-    return nok(code)
-  }
-  function afterRightAlignment(code) {
-    if (code === null || markdownLineEnding(code)) {
-      return rowEndDelimiter(code)
-    }
-    if (markdownSpace(code)) {
-      effects.enter('whitespace');
-      effects.consume(code);
-      return inWhitespaceDelimiter
-    }
-    if (code === 124) {
-      effects.enter('tableCellDivider');
-      effects.consume(code);
-      effects.exit('tableCellDivider');
-      return atDelimiterRowBreak
-    }
-    return nok(code)
-  }
-  function rowEndDelimiter(code) {
-    effects.exit('tableDelimiterRow');
-    if (!hasDash || tableHeaderCount !== align.length) {
-      return nok(code)
-    }
-    if (code === null) {
-      return tableClose(code)
-    }
-    return effects.check(
-      nextPrefixedOrBlank,
-      tableClose,
-      effects.attempt(
-        {
-          tokenize: tokenizeRowEnd,
-          partial: true
-        },
-        factorySpace(effects, bodyStart, 'linePrefix', 4),
-        tableClose
-      )
-    )(code)
-  }
-  function tableClose(code) {
-    effects.exit('table');
-    return ok(code)
-  }
-  function bodyStart(code) {
-    effects.enter('tableBody');
-    return rowStartBody(code)
-  }
-  function rowStartBody(code) {
-    effects.enter('tableRow');
-    if (code === 124) {
-      return cellDividerBody(code)
-    }
-    effects.enter('temporaryTableCellContent');
-    return inCellContentBody(code)
-  }
-  function cellDividerBody(code) {
-    effects.enter('tableCellDivider');
-    effects.consume(code);
-    effects.exit('tableCellDivider');
-    return cellBreakBody
-  }
-  function cellBreakBody(code) {
-    if (code === null || markdownLineEnding(code)) {
-      return atRowEndBody(code)
-    }
-    if (markdownSpace(code)) {
-      effects.enter('whitespace');
-      effects.consume(code);
-      return inWhitespaceBody
-    }
-    if (code === 124) {
-      return cellDividerBody(code)
-    }
-    effects.enter('temporaryTableCellContent');
-    return inCellContentBody(code)
-  }
-  function inWhitespaceBody(code) {
-    if (markdownSpace(code)) {
-      effects.consume(code);
-      return inWhitespaceBody
-    }
-    effects.exit('whitespace');
-    return cellBreakBody(code)
-  }
-  function inCellContentBody(code) {
-    if (code === null || code === 124 || markdownLineEndingOrSpace(code)) {
-      effects.exit('temporaryTableCellContent');
-      return cellBreakBody(code)
-    }
-    effects.consume(code);
-    return code === 92 ? inCellContentEscapeBody : inCellContentBody
-  }
-  function inCellContentEscapeBody(code) {
-    if (code === 92 || code === 124) {
-      effects.consume(code);
-      return inCellContentBody
-    }
-    return inCellContentBody(code)
-  }
-  function atRowEndBody(code) {
-    effects.exit('tableRow');
-    if (code === null) {
-      return tableBodyClose(code)
-    }
-    return effects.check(
-      nextPrefixedOrBlank,
-      tableBodyClose,
-      effects.attempt(
-        {
-          tokenize: tokenizeRowEnd,
-          partial: true
-        },
-        factorySpace(effects, rowStartBody, 'linePrefix', 4),
-        tableBodyClose
-      )
-    )(code)
-  }
-  function tableBodyClose(code) {
-    effects.exit('tableBody');
-    return tableClose(code)
-  }
-  function tokenizeRowEnd(effects, ok, nok) {
-    return start
-    function start(code) {
-      effects.enter('lineEnding');
-      effects.consume(code);
-      effects.exit('lineEnding');
-      return factorySpace(effects, prefixed, 'linePrefix')
-    }
-    function prefixed(code) {
-      if (
-        self.parser.lazy[self.now().line] ||
-        code === null ||
-        markdownLineEnding(code)
-      ) {
-        return nok(code)
-      }
-      const tail = self.events[self.events.length - 1];
-      if (
-        !self.parser.constructs.disable.null.includes('codeIndented') &&
-        tail &&
-        tail[1].type === 'linePrefix' &&
-        tail[2].sliceSerialize(tail[1], true).length >= 4
-      ) {
-        return nok(code)
-      }
-      self._gfmTableDynamicInterruptHack = true;
-      return effects.check(
-        self.parser.constructs.flow,
-        function (code) {
-          self._gfmTableDynamicInterruptHack = false;
-          return nok(code)
-        },
-        function (code) {
-          self._gfmTableDynamicInterruptHack = false;
-          return ok(code)
-        }
-      )(code)
-    }
-  }
+  return previousCell
 }
-function tokenizeNextPrefixedOrBlank(effects, ok, nok) {
-  let size = 0;
-  return start
-  function start(code) {
-    effects.enter('check');
-    effects.consume(code);
-    return whitespace
+function flushTableEnd(map, context, index, table, tableBody) {
+  const exits = [];
+  const related = getPoint(context.events, index);
+  if (tableBody) {
+    tableBody.end = Object.assign({}, related);
+    exits.push(['exit', tableBody, context]);
   }
-  function whitespace(code) {
-    if (code === -1 || code === 32) {
-      effects.consume(code);
-      size++;
-      return size === 4 ? ok : whitespace
-    }
-    if (code === null || markdownLineEndingOrSpace(code)) {
-      return ok(code)
-    }
-    return nok(code)
-  }
+  table.end = Object.assign({}, related);
+  exits.push(['exit', table, context]);
+  map.add(index + 1, 0, exits);
+}
+function getPoint(events, index) {
+  const event = events[index];
+  const side = event[0] === 'enter' ? 'start' : 'end';
+  return event[1][side]
 }
 
 const tasklistCheck = {
@@ -19475,7 +19546,7 @@ let SemVer$2 = class SemVer {
         version = version.version;
       }
     } else if (typeof version !== 'string') {
-      throw new TypeError(`Invalid Version: ${require$$5.inspect(version)}`)
+      throw new TypeError(`Invalid version. Must be a string. Got type "${typeof version}".`)
     }
     if (version.length > MAX_LENGTH) {
       throw new TypeError(
