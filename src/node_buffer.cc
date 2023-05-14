@@ -38,6 +38,14 @@
 #include <cstring>
 #include <climits>
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define NODE_HAS_SIMD_NEON 1
+#endif
+
+#if NODE_HAS_SIMD_NEON
+#include <arm_neon.h>
+#endif
+
 #define THROW_AND_RETURN_UNLESS_BUFFER(env, obj)                            \
   THROW_AND_RETURN_IF_NOT_BUFFER(env, obj, "argument")                      \
 
@@ -741,6 +749,45 @@ void SlowByteLengthUtf8(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(args[0].As<String>()->Utf8Length(env->isolate()));
 }
 
+#if NODE_HAS_SIMD_NEON
+uint32_t FastByteLengthUtf8(Local<Value> receiver,
+                            const v8::FastOneByteString& source) {
+  auto data = reinterpret_cast<const uint8_t*>(source.data);
+  auto length = source.length;
+
+  uint32_t result{0};
+  const int lanes = sizeof(uint8x16_t);
+  uint8_t remaining = length % lanes;
+  const auto* simd_end = data + (length / lanes) * lanes;
+  const auto threshold = vdupq_n_u8(0x80);
+
+  for (; data < simd_end; data += lanes) {
+    // load 16 bytes
+    uint8x16_t input = vld1q_u8(data);
+
+    // compare to threshold (0x80)
+    uint8x16_t with_highbit = vcgeq_u8(input, threshold);
+
+    // shift and narrow
+    uint8x8_t highbits = vshrn_n_u16(vreinterpretq_u16_u8(with_highbit), 4);
+
+    // we have 0, 4 or 8 bits per byte
+    uint8x8_t bitsperbyte = vcnt_u8(highbits);
+
+    // sum the bytes vertically to uint32_t
+    result += vaddlv_u8(bitsperbyte);
+  }
+
+  // we overcounted by a factor of 4
+  result /= 4;
+
+  for (uint8_t j = 0; j < remaining; j++) {
+    result += (simd_end[j] >> 7);
+  }
+
+  return result + length;
+}
+#else
 uint32_t FastByteLengthUtf8(Local<Value> receiver,
                             const v8::FastOneByteString& source) {
   uint32_t result = 0;
@@ -752,6 +799,7 @@ uint32_t FastByteLengthUtf8(Local<Value> receiver,
   result += length;
   return result;
 }
+#endif
 
 static v8::CFunction fast_byte_length_utf8(
     v8::CFunction::Make(FastByteLengthUtf8));
