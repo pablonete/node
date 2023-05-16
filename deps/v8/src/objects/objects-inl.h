@@ -25,6 +25,7 @@
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/bigint.h"
+#include "src/objects/deoptimization-data-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/js-proxy-inl.h"  // TODO(jkummerow): Drop.
@@ -724,8 +725,9 @@ MaybeObjectSlot HeapObject::RawMaybeWeakField(int byte_offset) const {
   return MaybeObjectSlot(field_address(byte_offset));
 }
 
-CodeObjectSlot HeapObject::RawCodeField(int byte_offset) const {
-  return CodeObjectSlot(field_address(byte_offset));
+InstructionStreamSlot HeapObject::RawInstructionStreamField(
+    int byte_offset) const {
+  return InstructionStreamSlot(field_address(byte_offset));
 }
 
 ExternalPointerSlot HeapObject::RawExternalPointerField(int byte_offset) const {
@@ -1285,7 +1287,7 @@ MaybeHandle<Object> Object::Share(Isolate* isolate, Handle<Object> value,
                    throw_if_cannot_be_shared);
 }
 
-// https://tc39.es/proposal-symbols-as-weakmap-keys/#sec-canbeheldweakly-abstract-operation
+// https://tc39.es/ecma262/#sec-canbeheldweakly
 bool Object::CanBeHeldWeakly() const {
   if (IsJSReceiver()) {
     // TODO(v8:12547) Shared structs and arrays should only be able to point
@@ -1296,10 +1298,7 @@ bool Object::CanBeHeldWeakly() const {
     }
     return true;
   }
-  if (v8_flags.harmony_symbol_as_weakmap_key) {
-    return IsSymbol() && !Symbol::cast(*this).is_in_public_symbol_table();
-  }
-  return false;
+  return IsSymbol() && !Symbol::cast(*this).is_in_public_symbol_table();
 }
 
 Handle<Object> ObjectHashTableShape::AsHandle(Handle<Object> key) {

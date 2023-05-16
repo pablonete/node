@@ -281,7 +281,7 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
 static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
                     std::ostream& os, CodeReference code,
                     const V8NameConverter& converter, byte* begin, byte* end,
-                    Address current_pc) {
+                    Address current_pc, size_t range_limit) {
   CHECK(!code.is_null());
   v8::base::EmbeddedVector<char, 128> decode_buffer;
   std::ostringstream out;
@@ -313,29 +313,24 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
         pc += 4;
       } else if (!rit.done() &&
                  rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
-                 (rit.rinfo()->rmode() == RelocInfo::INTERNAL_REFERENCE ||
-                  rit.rinfo()->rmode() == RelocInfo::LITERAL_CONSTANT)) {
-        // raw pointer embedded in code stream, e.g., jump table
+                 rit.rinfo()->rmode() == RelocInfo::INTERNAL_REFERENCE) {
+        // A raw pointer embedded in code stream.
         byte* ptr =
             base::ReadUnalignedValue<byte*>(reinterpret_cast<Address>(pc));
-        if (RelocInfo::IsInternalReference(rit.rinfo()->rmode())) {
-          SNPrintF(decode_buffer,
-                   "%08" V8PRIxPTR "       jump table entry %4zu",
-                   reinterpret_cast<intptr_t>(ptr),
-                   static_cast<size_t>(ptr - begin));
-        } else {
-          const char* kType = RelocInfo::IsLiteralConstant(rit.rinfo()->rmode())
-                                  ? "    literal constant"
-                                  : "embedded data object";
-          SNPrintF(decode_buffer, "%08" V8PRIxPTR "       %s 0x%08" V8PRIxPTR,
-                   reinterpret_cast<intptr_t>(ptr), kType,
-                   reinterpret_cast<intptr_t>(ptr));
-        }
+        SNPrintF(decode_buffer, "%08" V8PRIxPTR "       jump table entry %4zu",
+                 reinterpret_cast<intptr_t>(ptr),
+                 static_cast<size_t>(ptr - begin));
         pc += sizeof(ptr);
       } else {
         decode_buffer[0] = '\0';
         pc += d.InstructionDecode(decode_buffer, pc);
       }
+    }
+
+    Address pc_address = reinterpret_cast<Address>(pc);
+    if (range_limit != 0) {
+      if (pc_address > current_pc + range_limit) break;
+      if (pc_address <= current_pc - range_limit) continue;
     }
 
     // Collect RelocInfo for this instruction (prev_pc .. pc-1)
@@ -350,9 +345,13 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
       datas.push_back(rit.rinfo()->data());
       rit.next();
     }
-    while (cit.HasCurrent() &&
-           cit.GetPCOffset() < static_cast<Address>(pc - begin)) {
-      comments.push_back(cit.GetComment());
+    while (cit.HasCurrent()) {
+      Address cur = cit.GetPCOffset();
+      if (cur >= static_cast<Address>(pc - begin)) break;
+      if (range_limit == 0 ||
+          cur + range_limit > current_pc - reinterpret_cast<Address>(begin)) {
+        comments.push_back(cit.GetComment());
+      }
       cit.Next();
     }
 
@@ -384,9 +383,7 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
       if (host.is_code()) {
         code_handle = host.as_code();
 
-        RelocInfo relocinfo(pcs[i], rmodes[i], datas[i], *code_handle,
-                            code_handle->instruction_stream(), constant_pool);
-
+        RelocInfo relocinfo(pcs[i], rmodes[i], datas[i], constant_pool);
         bool first_reloc_info = (i == 0);
         PrintRelocInfo(out, isolate, ref_encoder, os, code, &relocinfo,
                        first_reloc_info);
@@ -402,7 +399,7 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
     // by IsInConstantPool() below.
     if (pcs.empty() && !code.is_null() && !decoding_constant_pool) {
       RelocInfo dummy_rinfo(reinterpret_cast<Address>(prev_pc),
-                            RelocInfo::NO_INFO, 0, Code(), InstructionStream());
+                            RelocInfo::NO_INFO);
       if (dummy_rinfo.IsInConstantPool()) {
         Address constant_pool_entry_address =
             dummy_rinfo.constant_pool_entry_address();
@@ -430,8 +427,12 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
 
   // Emit comments following the last instruction (if any).
   while (cit.HasCurrent()) {
-    out << "                  " << cit.GetComment();
-    DumpBuffer(os, out);
+    Address cur = cit.GetPCOffset();
+    if (range_limit == 0 ||
+        cur + range_limit == current_pc - reinterpret_cast<Address>(begin)) {
+      out << "                  " << cit.GetComment();
+      DumpBuffer(os, out);
+    }
     cit.Next();
   }
 
@@ -439,7 +440,8 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
 }
 
 int Disassembler::Decode(Isolate* isolate, std::ostream& os, byte* begin,
-                         byte* end, CodeReference code, Address current_pc) {
+                         byte* end, CodeReference code, Address current_pc,
+                         size_t range_limit) {
   DCHECK_WITH_MSG(v8_flags.text_is_readable,
                   "Builtins disassembly requires a readable .text section");
   V8NameConverter v8NameConverter(isolate, code);
@@ -450,19 +452,20 @@ int Disassembler::Decode(Isolate* isolate, std::ostream& os, byte* begin,
     DisallowGarbageCollection no_alloc;
     ExternalReferenceEncoder ref_encoder(isolate);
     return DecodeIt(isolate, &ref_encoder, os, code, v8NameConverter, begin,
-                    end, current_pc);
+                    end, current_pc, range_limit);
   } else {
     // No isolate => isolate-independent code. Only V8 External references
     // available.
     return DecodeIt(nullptr, nullptr, os, code, v8NameConverter, begin, end,
-                    current_pc);
+                    current_pc, range_limit);
   }
 }
 
 #else  // ENABLE_DISASSEMBLER
 
 int Disassembler::Decode(Isolate* isolate, std::ostream& os, byte* begin,
-                         byte* end, CodeReference code, Address current_pc) {
+                         byte* end, CodeReference code, Address current_pc,
+                         size_t range_limit) {
   return 0;
 }
 

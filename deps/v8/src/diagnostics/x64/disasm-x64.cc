@@ -691,7 +691,8 @@ int DisassemblerX64::PrintOperands(const char* mnem, OperandType op_order,
 // Returns number of bytes used by machine instruction, including *data byte.
 // Writes immediate instructions to 'tmp_buffer_'.
 int DisassemblerX64::PrintImmediateOp(byte* data) {
-  bool byte_size_immediate = (*data & 0x02) != 0;
+  DCHECK(*data == 0x80 || *data == 0x81 || *data == 0x83);
+  bool byte_size_immediate = *data != 0x81;
   byte modrm = *(data + 1);
   int mod, regop, rm;
   get_modrm(modrm, &mod, &regop, &rm);
@@ -725,7 +726,8 @@ int DisassemblerX64::PrintImmediateOp(byte* data) {
       UnimplementedInstruction();
   }
   AppendToBuffer("%s%c ", mnem, operand_size_code());
-  int count = PrintRightOperand(data + 1);
+  int count = byte_size_operand_ ? PrintRightByteOperand(data + 1)
+                                 : PrintRightOperand(data + 1);
   AppendToBuffer(",0x");
   OperandSize immediate_size =
       byte_size_immediate ? OPERAND_BYTE_SIZE : operand_size();
@@ -973,6 +975,11 @@ int DisassemblerX64::AVXInstruction(byte* data) {
     int mod, regop, rm, vvvv = vex_vreg();
     get_modrm(*current, &mod, &regop, &rm);
     switch (opcode) {
+      case 0x00:
+        AppendToBuffer("vpermq %s,", NameOfAVXRegister(regop));
+        current += PrintRightAVXOperand(current);
+        AppendToBuffer(",0x%x", *current++);
+        break;
       case 0x08:
         AppendToBuffer("vroundps %s,", NameOfAVXRegister(regop));
         current += PrintRightAVXOperand(current);
@@ -2494,6 +2501,9 @@ int DisassemblerX64::InstructionDecode(v8::base::Vector<char> out_buffer,
         break;
       }
 
+      case 0x80:
+        byte_size_operand_ = true;
+        V8_FALLTHROUGH;
       case 0x81:  // fall through
       case 0x83:  // 0x81 with sign extension bit set
         data += PrintImmediateOp(data);
@@ -2572,15 +2582,6 @@ int DisassemblerX64::InstructionDecode(v8::base::Vector<char> out_buffer,
             data += 4;
           }
         }
-      } break;
-
-      case 0x80: {
-        data++;
-        AppendToBuffer("cmpb ");
-        data += PrintRightByteOperand(data);
-        int32_t imm = *data;
-        AppendToBuffer(",0x%x", imm);
-        data++;
       } break;
 
       case 0x88:  // 8bit, fall through

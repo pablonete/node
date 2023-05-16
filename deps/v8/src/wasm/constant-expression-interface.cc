@@ -136,7 +136,7 @@ void ConstantExpressionInterface::GlobalGet(FullDecoder* decoder, Value* result,
   result->runtime_value =
       global.type.is_numeric()
           ? WasmValue(
-                reinterpret_cast<byte*>(
+                reinterpret_cast<uint8_t*>(
                     instance_->untagged_globals_buffer().backing_store()) +
                     global.offset,
                 global.type)
@@ -256,7 +256,7 @@ void ConstantExpressionInterface::ArrayNewDefault(
 
 void ConstantExpressionInterface::ArrayNewFixed(
     FullDecoder* decoder, const ArrayIndexImmediate& imm,
-    const base::Vector<Value>& elements, const Value& rtt, Value* result) {
+    base::Vector<const Value> elements, const Value& rtt, Value* result) {
   if (!generate_value()) return;
   std::vector<WasmValue> element_values;
   for (Value elem : elements) element_values.push_back(elem.runtime_value);

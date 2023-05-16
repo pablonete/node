@@ -514,6 +514,8 @@ void InstructionSelector::VisitProtectedLoad(Node* node) {
   UNIMPLEMENTED();
 }
 
+void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
+
 void InstructionSelector::VisitStore(Node* node) {
   Loong64OperandGenerator g(this);
   Node* base = node->InputAt(0);
@@ -1468,36 +1470,21 @@ void InstructionSelector::VisitBitcastWord32ToWord64(Node* node) {
 }
 
 void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
+  // On LoongArch64, int32 values should all be sign-extended to 64-bit, so
+  // no need to sign-extend them here.
+  // But when call to a host function in simulator, if the function return an
+  // int32 value, the simulator do not sign-extend to int64, because in
+  // simulator we do not know the function whether return an int32 or int64.
+#ifdef USE_SIMULATOR
   Node* value = node->InputAt(0);
-  if ((value->opcode() == IrOpcode::kLoad ||
-       value->opcode() == IrOpcode::kLoadImmutable) &&
-      CanCover(node, value)) {
-    // Generate sign-extending load.
-    LoadRepresentation load_rep = LoadRepresentationOf(value->op());
-    InstructionCode opcode = kArchNop;
-    switch (load_rep.representation()) {
-      case MachineRepresentation::kBit:  // Fall through.
-      case MachineRepresentation::kWord8:
-        opcode = load_rep.IsUnsigned() ? kLoong64Ld_bu : kLoong64Ld_b;
-        break;
-      case MachineRepresentation::kWord16:
-        opcode = load_rep.IsUnsigned() ? kLoong64Ld_hu : kLoong64Ld_h;
-        break;
-      case MachineRepresentation::kTaggedSigned:
-      case MachineRepresentation::kTagged:
-      case MachineRepresentation::kWord32:
-        opcode = kLoong64Ld_w;
-        break;
-      default:
-        UNREACHABLE();
-    }
-    EmitLoad(this, value, opcode, node);
-  } else {
+  if (value->opcode() == IrOpcode::kCall) {
     Loong64OperandGenerator g(this);
     Emit(kLoong64Sll_w, g.DefineAsRegister(node), g.UseRegister(value),
          g.TempImmediate(0));
     return;
   }
+#endif
+  EmitIdentity(node);
 }
 
 bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(Node* node) {
@@ -1891,10 +1878,16 @@ static void VisitCompare(InstructionSelector* selector, InstructionCode opcode,
 #ifdef V8_COMPRESS_POINTERS
   if (opcode == kLoong64Cmp32) {
     Loong64OperandGenerator g(selector);
-    InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
     InstructionOperand inputs[] = {left, right};
-    selector->EmitWithContinuation(opcode, 0, nullptr, arraysize(inputs),
-                                   inputs, arraysize(temps), temps, cont);
+    if (right.IsImmediate()) {
+      InstructionOperand temps[1] = {g.TempRegister()};
+      selector->EmitWithContinuation(opcode, 0, nullptr, arraysize(inputs),
+                                     inputs, arraysize(temps), temps, cont);
+    } else {
+      InstructionOperand temps[2] = {g.TempRegister(), g.TempRegister()};
+      selector->EmitWithContinuation(opcode, 0, nullptr, arraysize(inputs),
+                                     inputs, arraysize(temps), temps, cont);
+    }
     return;
   }
 #endif
@@ -1961,14 +1954,17 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
           break;
         case kSignedLessThan:
         case kSignedGreaterThanOrEqual:
+        case kSignedLessThanOrEqual:
+        case kSignedGreaterThan:
         case kUnsignedLessThan:
         case kUnsignedGreaterThanOrEqual:
+        case kUnsignedLessThanOrEqual:
+        case kUnsignedGreaterThan:
           VisitCompare(selector, opcode, g.UseUniqueRegister(left),
                        g.UseImmediate(right), cont);
           break;
         default:
-          VisitCompare(selector, opcode, g.UseUniqueRegister(left),
-                       g.UseUniqueRegister(right), cont);
+          UNREACHABLE();
       }
     }
   } else if (g.CanBeImmediate(left, opcode)) {
@@ -1990,14 +1986,17 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
           break;
         case kSignedLessThan:
         case kSignedGreaterThanOrEqual:
+        case kSignedLessThanOrEqual:
+        case kSignedGreaterThan:
         case kUnsignedLessThan:
         case kUnsignedGreaterThanOrEqual:
+        case kUnsignedLessThanOrEqual:
+        case kUnsignedGreaterThan:
           VisitCompare(selector, opcode, g.UseUniqueRegister(right),
                        g.UseImmediate(left), cont);
           break;
         default:
-          VisitCompare(selector, opcode, g.UseUniqueRegister(right),
-                       g.UseUniqueRegister(left), cont);
+          UNREACHABLE();
       }
     }
   } else {

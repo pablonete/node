@@ -59,7 +59,7 @@ Builtin BigIntComparisonBuiltinOf(Operation const& op) {
 CodeStubAssembler::CodeStubAssembler(compiler::CodeAssemblerState* state)
     : compiler::CodeAssembler(state),
       TorqueGeneratedExportedMacrosAssembler(state) {
-  if (DEBUG_BOOL && v8_flags.csa_trap_on_node != nullptr) {
+  if (v8_flags.csa_trap_on_node != nullptr) {
     HandleBreakOnNode();
   }
 }
@@ -1740,8 +1740,12 @@ TNode<RawPtrT> CodeStubAssembler::LoadExternalPointerFromObject(
 
   TNode<ExternalPointerHandleT> handle =
       LoadObjectField<ExternalPointerHandleT>(object, offset);
+
+  // Use UniqueUint32Constant instead of Uint32Constant here in order to ensure
+  // that the graph structure does not depend on the configuration-specific
+  // constant value (Uint32Constant uses cached nodes).
   TNode<Uint32T> index =
-      Word32Shr(handle, Uint32Constant(kExternalPointerIndexShift));
+      Word32Shr(handle, UniqueUint32Constant(kExternalPointerIndexShift));
   // TODO(v8:10391): consider updating ElementOffsetFromIndex to generate code
   // that does one shift right instead of two shifts (right and then left).
   TNode<IntPtrT> table_offset = ElementOffsetFromIndex(
@@ -1769,8 +1773,12 @@ void CodeStubAssembler::StoreExternalPointerToObject(TNode<HeapObject> object,
 
   TNode<ExternalPointerHandleT> handle =
       LoadObjectField<ExternalPointerHandleT>(object, offset);
+
+  // Use UniqueUint32Constant instead of Uint32Constant here in order to ensure
+  // that the graph structure does not depend on the configuration-specific
+  // constant value (Uint32Constant uses cached nodes).
   TNode<Uint32T> index =
-      Word32Shr(handle, Uint32Constant(kExternalPointerIndexShift));
+      Word32Shr(handle, UniqueUint32Constant(kExternalPointerIndexShift));
   // TODO(v8:10391): consider updating ElementOffsetFromIndex to generate code
   // that does one shift right instead of two shifts (right and then left).
   TNode<IntPtrT> table_offset = ElementOffsetFromIndex(
@@ -6547,9 +6555,9 @@ TNode<BoolT> CodeStubAssembler::IsPromiseSpeciesProtectorCellInvalid() {
 }
 
 TNode<BoolT>
-CodeStubAssembler::IsNumberStringPrototypeNoReplaceProtectorCellInvalid() {
+CodeStubAssembler::IsNumberStringNotRegexpLikeProtectorCellInvalid() {
   TNode<Smi> invalid = SmiConstant(Protectors::kProtectorInvalid);
-  TNode<PropertyCell> cell = NumberStringPrototypeNoReplaceProtectorConstant();
+  TNode<PropertyCell> cell = NumberStringNotRegexpLikeProtectorConstant();
   TNode<Object> cell_value = LoadObjectField(cell, PropertyCell::kValueOffset);
   return TaggedEqual(cell_value, invalid);
 }
@@ -10179,7 +10187,8 @@ template void CodeStubAssembler::LoadPropertyFromDictionary(
 TNode<Object> CodeStubAssembler::CallGetterIfAccessor(
     TNode<Object> value, TNode<HeapObject> holder, TNode<Uint32T> details,
     TNode<Context> context, TNode<Object> receiver, TNode<Object> name,
-    Label* if_bailout, GetOwnPropertyMode mode) {
+    Label* if_bailout, GetOwnPropertyMode mode,
+    ExpectedReceiverMode expected_receiver_mode) {
   TVARIABLE(Object, var_value, value);
   Label done(this), if_accessor_info(this, Label::kDeferred);
 
@@ -10212,6 +10221,9 @@ TNode<Object> CodeStubAssembler::CallGetterIfAccessor(
       {
         // Call the accessor. No need to check side-effect mode here, since it
         // will be checked later in DebugOnFunctionCall.
+        // It's too early to convert receiver to JSReceiver at this point
+        // (the Call builtin will do the conversion), so we ignore the
+        // |expected_receiver_mode| here.
         var_value = Call(context, getter, receiver);
         Goto(&done);
       }
@@ -10229,12 +10241,25 @@ TNode<Object> CodeStubAssembler::CallGetterIfAccessor(
                                          : if_bailout;
         GotoIfNot(IsTheHole(cached_property_name), has_cached_property);
 
+        TNode<JSReceiver> js_receiver;
+        switch (expected_receiver_mode) {
+          case kExpectingJSReceiver:
+            js_receiver = CAST(receiver);
+            break;
+          case kExpectingAnyReceiver:
+            // TODO(ishell): in case the function template info has a signature
+            // and receiver is not a JSReceiver the signature check in
+            // CallFunctionTemplate builtin will fail anyway, so we can short
+            // cut it here and throw kIllegalInvocation immediately.
+            js_receiver = ToObject_Inline(context, receiver);
+            break;
+        }
         TNode<NativeContext> creation_context =
             GetCreationContext(CAST(holder), if_bailout);
         var_value = CallBuiltin(
             Builtin::kCallFunctionTemplate_CheckAccessAndCompatibleReceiver,
             creation_context, getter, IntPtrConstant(i::JSParameterCount(0)),
-            receiver);
+            js_receiver);
         Goto(&done);
 
         if (mode == kCallJSGetterUseCachedName) {
@@ -10322,12 +10347,13 @@ void CodeStubAssembler::TryGetOwnProperty(
     TNode<Context> context, TNode<Object> receiver, TNode<JSReceiver> object,
     TNode<Map> map, TNode<Int32T> instance_type, TNode<Name> unique_name,
     Label* if_found_value, TVariable<Object>* var_value, Label* if_not_found,
-    Label* if_bailout) {
+    Label* if_bailout, ExpectedReceiverMode expected_receiver_mode) {
   TryGetOwnProperty(context, receiver, object, map, instance_type, unique_name,
                     if_found_value, var_value, nullptr, nullptr, if_not_found,
                     if_bailout,
                     receiver == object ? kCallJSGetterUseCachedName
-                                       : kCallJSGetterDontUseCachedName);
+                                       : kCallJSGetterDontUseCachedName,
+                    expected_receiver_mode);
 }
 
 void CodeStubAssembler::TryGetOwnProperty(
@@ -10335,9 +10361,15 @@ void CodeStubAssembler::TryGetOwnProperty(
     TNode<Map> map, TNode<Int32T> instance_type, TNode<Name> unique_name,
     Label* if_found_value, TVariable<Object>* var_value,
     TVariable<Uint32T>* var_details, TVariable<Object>* var_raw_value,
-    Label* if_not_found, Label* if_bailout, GetOwnPropertyMode mode) {
+    Label* if_not_found, Label* if_bailout, GetOwnPropertyMode mode,
+    ExpectedReceiverMode expected_receiver_mode) {
   DCHECK_EQ(MachineRepresentation::kTagged, var_value->rep());
   Comment("TryGetOwnProperty");
+  if (receiver == object) {
+    // If |receiver| is exactly the same Node as the |object| which is
+    // guaranteed to be JSReceiver override the |expected_receiver_mode|.
+    expected_receiver_mode = kExpectingJSReceiver;
+  }
   CSA_DCHECK(this, IsUniqueNameNoCachedIndex(unique_name));
   TVARIABLE(HeapObject, var_meta_storage);
   TVARIABLE(IntPtrT, var_entry);
@@ -10386,9 +10418,9 @@ void CodeStubAssembler::TryGetOwnProperty(
     if (var_raw_value) {
       *var_raw_value = *var_value;
     }
-    TNode<Object> value =
-        CallGetterIfAccessor(var_value->value(), object, var_details->value(),
-                             context, receiver, unique_name, if_bailout, mode);
+    TNode<Object> value = CallGetterIfAccessor(
+        var_value->value(), object, var_details->value(), context, receiver,
+        unique_name, if_bailout, mode, expected_receiver_mode);
     *var_value = value;
     Goto(if_found_value);
   }
@@ -11177,10 +11209,6 @@ void CodeStubAssembler::UpdateFeedback(TNode<Smi> feedback,
 void CodeStubAssembler::ReportFeedbackUpdate(
     TNode<FeedbackVector> feedback_vector, TNode<UintPtrT> slot_id,
     const char* reason) {
-  // Reset profiler ticks.
-  StoreObjectFieldNoWriteBarrier(
-      feedback_vector, FeedbackVector::kProfilerTicksOffset, Int32Constant(0));
-
 #ifdef V8_TRACE_FEEDBACK_UPDATES
   // Trace the update.
   CallRuntime(Runtime::kTraceUpdateFeedback, NoContextConstant(),
@@ -14467,10 +14495,9 @@ TNode<HeapObject> CodeStubAssembler::GetSuperConstructor(
   return LoadMapPrototype(map);
 }
 
-void CodeStubAssembler::FindNonDefaultConstructorOrConstruct(
-    TNode<Context> context, TNode<JSFunction> this_function,
-    TVariable<Object>& constructor, Label* found_default_base_ctor,
-    Label* found_something_else) {
+void CodeStubAssembler::FindNonDefaultConstructor(
+    TNode<JSFunction> this_function, TVariable<Object>& constructor,
+    Label* found_default_base_ctor, Label* found_something_else) {
   Label loop(this, &constructor);
 
   constructor = GetSuperConstructor(this_function);
@@ -15494,15 +15521,14 @@ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
   return Word32NotEqual(is_debug_active, Int32Constant(0));
 }
 
+// TODO(v8:13825): remove once CallApiGetter/CallApiAccessor are able to handle
+// side effects checking.
 TNode<BoolT> CodeStubAssembler::IsSideEffectFreeDebuggingActive() {
-  TNode<Uint8T> debug_execution_mode = Load<Uint8T>(ExternalConstant(
-      ExternalReference::debug_execution_mode_address(isolate())));
-
-  TNode<BoolT> is_active =
-      Word32Equal(debug_execution_mode,
-                  Int32Constant(DebugInfo::ExecutionMode::kSideEffects));
-
-  return is_active;
+  TNode<Uint8T> execution_mode = Load<Uint8T>(
+      ExternalConstant(ExternalReference::execution_mode_address(isolate())));
+  int32_t mask =
+      static_cast<int32_t>(IsolateExecutionModeFlag::kCheckSideEffects);
+  return IsSetWord32(execution_mode, mask);
 }
 
 TNode<BoolT> CodeStubAssembler::HasAsyncEventDelegate() {
@@ -15698,14 +15724,15 @@ TNode<Code> CodeStubAssembler::GetSharedFunctionInfoCode(
   return sfi_code.value();
 }
 
-TNode<RawPtrT> CodeStubAssembler::GetCodeEntry(TNode<Code> code) {
-  return LoadObjectField<RawPtrT>(code,
-                                  IntPtrConstant(Code::kCodeEntryPointOffset));
+TNode<RawPtrT> CodeStubAssembler::LoadCodeInstructionStart(TNode<Code> code) {
+  return LoadObjectField<RawPtrT>(
+      code, IntPtrConstant(Code::kInstructionStartOffset));
 }
 
 TNode<BoolT> CodeStubAssembler::IsMarkedForDeoptimization(TNode<Code> code) {
+  static_assert(FIELD_SIZE(Code::kFlagsOffset) * kBitsPerByte == 32);
   return IsSetWord32<Code::MarkedForDeoptimizationField>(
-      LoadObjectField<Int16T>(code, Code::kKindSpecificFlagsOffset));
+      LoadObjectField<Int32T>(code, Code::kFlagsOffset));
 }
 
 TNode<JSFunction> CodeStubAssembler::AllocateFunctionWithMapAndContext(
@@ -15886,8 +15913,8 @@ void CodeStubAssembler::PrintToStream(const char* prefix,
   if (prefix != nullptr) {
     std::string formatted(prefix);
     formatted += ": ";
-    Handle<String> string = isolate()->factory()->NewStringFromAsciiChecked(
-        formatted.c_str(), AllocationType::kOld);
+    Handle<String> string =
+        isolate()->factory()->InternalizeString(formatted.c_str());
     CallRuntime(Runtime::kGlobalPrint, NoContextConstant(),
                 HeapConstant(string), SmiConstant(stream));
   }

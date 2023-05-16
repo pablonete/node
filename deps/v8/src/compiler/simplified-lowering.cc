@@ -3431,8 +3431,10 @@ class RepresentationSelector {
                 }
                 return;
               } else if (input_type.Is(Type::SignedBigInt64())) {
-                VisitBinop<T>(node, UseInfo::Word64(), UseInfo::Any(),
-                              MachineRepresentation::kWord64);
+                VisitBinop<T>(
+                    node,
+                    UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
+                    UseInfo::Any(), MachineRepresentation::kWord64);
                 if (lower<T>()) {
                   if (!lossless || shift_amount > 63) {
                     ReplaceWithPureNode(
@@ -3453,8 +3455,10 @@ class RepresentationSelector {
                 }
                 return;
               } else if (input_type.Is(Type::UnsignedBigInt64())) {
-                VisitBinop<T>(node, UseInfo::Word64(), UseInfo::Any(),
-                              MachineRepresentation::kWord64);
+                VisitBinop<T>(
+                    node,
+                    UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
+                    UseInfo::Any(), MachineRepresentation::kWord64);
                 if (lower<T>()) {
                   if (!lossless || shift_amount > 63) {
                     DeferReplacement(node, jsgraph_->Int64Constant(0));
@@ -3523,9 +3527,12 @@ class RepresentationSelector {
         }
       }
       case IrOpcode::kSpeculativeBigIntNegate: {
-        if (truncation.IsUnused()) {
-          VisitUnused<T>(node);
-        } else if (truncation.IsUsedAsWord64()) {
+        // NOTE: If truncation is Unused, we still need to preserve at least the
+        // BigInt type check (see http://crbug.com/1431713 for some details).
+        // We can use the standard lowering to word64 operations and have
+        // following phases remove the unused truncation and subtraction
+        // operations.
+        if (truncation.IsUsedAsWord64()) {
           VisitUnop<T>(node,
                        UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
                        MachineRepresentation::kWord64);
@@ -3815,14 +3822,14 @@ class RepresentationSelector {
         } else if (value_type.Is(Type::Number())) {
           ProcessInput<T>(node, 2, UseInfo::TruncatingFloat64());  // value
           if (lower<T>()) {
-            Handle<Map> double_map = DoubleMapParameterOf(node->op());
+            MapRef double_map = DoubleMapParameterOf(node->op());
             ChangeOp(node,
                      simplified()->TransitionAndStoreNumberElement(double_map));
           }
         } else if (value_type.Is(Type::NonNumber())) {
           ProcessInput<T>(node, 2, UseInfo::AnyTagged());  // value
           if (lower<T>()) {
-            Handle<Map> fast_map = FastMapParameterOf(node->op());
+            MapRef fast_map = FastMapParameterOf(node->op());
             ChangeOp(node, simplified()->TransitionAndStoreNonNumberElement(
                                fast_map, value_type));
           }
@@ -3903,7 +3910,8 @@ class RepresentationSelector {
         if (InputIs(node, Type::Boolean())) {
           VisitUnop<T>(node, UseInfo::Bool(), MachineRepresentation::kWord32);
           if (lower<T>()) {
-            DeferReplacement(node, node->InputAt(0));
+            DeferReplacement(node, InsertSemanticsHintForVerifier(
+                                       node->op(), node->InputAt(0)));
           }
         } else if (InputIs(node, Type::String())) {
           VisitUnop<T>(node, UseInfo::AnyTagged(),
@@ -3916,7 +3924,8 @@ class RepresentationSelector {
             VisitUnop<T>(node, UseInfo::TruncatingWord32(),
                          MachineRepresentation::kWord32);
             if (lower<T>()) {
-              DeferReplacement(node, node->InputAt(0));
+              DeferReplacement(node, InsertSemanticsHintForVerifier(
+                                         node->op(), node->InputAt(0)));
             }
           } else {
             VisitUnop<T>(node, UseInfo::AnyTagged(),
@@ -3930,7 +3939,8 @@ class RepresentationSelector {
             VisitUnop<T>(node, UseInfo::TruncatingFloat64(),
                          MachineRepresentation::kFloat64);
             if (lower<T>()) {
-              DeferReplacement(node, node->InputAt(0));
+              DeferReplacement(node, InsertSemanticsHintForVerifier(
+                                         node->op(), node->InputAt(0)));
             }
           } else {
             VisitUnop<T>(node, UseInfo::AnyTagged(),
@@ -4352,10 +4362,6 @@ class RepresentationSelector {
         return;
       }
 
-      case IrOpcode::kFoldConstant:
-        VisitInputs<T>(node);
-        return SetOutput<T>(node, MachineRepresentation::kTaggedPointer);
-
       case IrOpcode::kFinishRegion:
         VisitInputs<T>(node);
         // Assume the output is tagged pointer.
@@ -4465,7 +4471,7 @@ class RepresentationSelector {
 #endif
               FATAL("%%VerifyType: unsupported type");
             }
-            DeferReplacement(node, node->InputAt(0));
+            DisconnectFromEffectAndControl(node);
           }
         }
         return;
@@ -4551,7 +4557,13 @@ class RepresentationSelector {
 
   void DisconnectFromEffectAndControl(Node* node) {
     if (node->op()->EffectInputCount() == 1) {
-      Node* control = NodeProperties::GetControlInput(node);
+      Node* control;
+      if (node->op()->ControlInputCount() == 1) {
+        control = NodeProperties::GetControlInput(node);
+      } else {
+        DCHECK_EQ(node->op()->ControlInputCount(), 0);
+        control = nullptr;
+      }
       Node* effect = NodeProperties::GetEffectInput(node);
       ReplaceEffectControlUses(node, effect, control);
     } else {
@@ -4576,9 +4588,17 @@ class RepresentationSelector {
   }
 
   Node* InsertTypeOverrideForVerifier(const Type& type, Node* node) {
-    if (verification_enabled()) {
+    if (V8_UNLIKELY(verification_enabled())) {
       DCHECK(!type.IsInvalid());
       node = graph()->NewNode(common()->SLVerifierHint(nullptr, type), node);
+      verifier_->RecordHint(node);
+    }
+    return node;
+  }
+
+  Node* InsertSemanticsHintForVerifier(const Operator* semantics, Node* node) {
+    if (V8_UNLIKELY(verification_enabled())) {
+      node = graph()->NewNode(common()->SLVerifierHint(semantics, {}), node);
       verifier_->RecordHint(node);
     }
     return node;

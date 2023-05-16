@@ -91,6 +91,9 @@ declare_args() {
   # Scan the call stack conservatively during garbage collection.
   v8_enable_conservative_stack_scanning = false
 
+  # Use direct pointers in local handles.
+  v8_enable_direct_local = false
+
   v8_enable_google_benchmark = false
 
   cppgc_is_standalone = false
@@ -113,6 +116,9 @@ declare_args() {
   # Enable 2gb cage for fast compression/decompression. Currently disabled
   # due to an increased number of OOMs.
   cppgc_enable_2gb_cage = false
+
+  # Enable support for larger cages, up to 16GB.
+  cppgc_enable_larger_cage = false
 
   # Enable advanced BigInt algorithms, costing about 10-30 KB binary size
   # depending on platform. Disabled on Android to save binary size.

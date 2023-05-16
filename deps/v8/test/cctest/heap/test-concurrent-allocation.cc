@@ -12,6 +12,7 @@
 #include "src/codegen/assembler.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
+#include "src/codegen/reloc-info-inl.h"
 #include "src/common/globals.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/handles.h"
@@ -387,7 +388,7 @@ UNINITIALIZED_TEST(ConcurrentBlackAllocation) {
   CHECK(thread->Start());
 
   sema_white.Wait();
-  heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
+  heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
                                 i::GarbageCollectionReason::kTesting);
   sema_marking_started.Signal();
 
@@ -454,7 +455,7 @@ UNINITIALIZED_TEST(ConcurrentWriteBarrier) {
     fixed_array = *fixed_array_handle;
     value = *value_handle;
   }
-  heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
+  heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
                                 i::GarbageCollectionReason::kTesting);
   CHECK(heap->marking_state()->IsUnmarked(value));
 
@@ -464,7 +465,7 @@ UNINITIALIZED_TEST(ConcurrentWriteBarrier) {
 
   thread->Join();
 
-  CHECK(heap->marking_state()->IsBlackOrGrey(value));
+  CHECK(heap->marking_state()->IsMarked(value));
   heap::InvokeMarkSweep(i_isolate);
 
   isolate->Dispose();
@@ -485,10 +486,13 @@ class ConcurrentRecordRelocSlotThread final : public v8::base::Thread {
     UnparkedScope unparked_scope(&local_heap);
     // Modification of InstructionStream object requires write access.
     RwxMemoryWriteScopeForTesting rwx_write_scope;
+    DisallowGarbageCollection no_gc;
+    InstructionStream istream = code_.instruction_stream();
     int mode_mask = RelocInfo::EmbeddedObjectModeMask();
+    CodePageMemoryModificationScope memory_modification_scope(istream);
     for (RelocIterator it(code_, mode_mask); !it.done(); it.next()) {
       DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
-      it.rinfo()->set_target_object(heap_, value_);
+      it.rinfo()->set_target_object(istream, value_);
     }
   }
 
@@ -514,10 +518,9 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
   {
     Code code;
     HeapObject value;
-    CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
     {
       HandleScope handle_scope(i_isolate);
-      i::byte buffer[i::Assembler::kDefaultBufferSize];
+      uint8_t buffer[i::Assembler::kDefaultBufferSize];
       MacroAssembler masm(i_isolate, v8::internal::CodeObjectRequired::kYes,
                           ExternalAssemblerBuffer(buffer, sizeof(buffer)));
 #if V8_TARGET_ARCH_ARM64
@@ -540,15 +543,11 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
       code = *code_handle;
       value = *value_handle;
     }
-    heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
                                   i::GarbageCollectionReason::kTesting);
     CHECK(heap->marking_state()->IsUnmarked(value));
 
     {
-      // TODO(v8:13023): remove ResetPKUPermissionsForThreadSpawning in the
-      // future when RwxMemoryWriteScope::SetDefaultPermissionsForNewThread() is
-      // stable.
-      ResetPKUPermissionsForThreadSpawning thread_scope;
       auto thread =
           std::make_unique<ConcurrentRecordRelocSlotThread>(heap, code, value);
       CHECK(thread->Start());
@@ -556,7 +555,7 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
       thread->Join();
     }
 
-    CHECK(heap->marking_state()->IsBlackOrGrey(value));
+    CHECK(heap->marking_state()->IsMarked(value));
     heap::InvokeMarkSweep(i_isolate);
   }
   isolate->Dispose();
